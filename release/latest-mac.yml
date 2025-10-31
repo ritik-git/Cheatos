@@ -1,0 +1,11 @@
+version: 1.0.0
+files:
+  - url: Meeting-Notes-Coder-1.0.0.dmg
+    sha512: DOoOsPPkIeRSz2rd5JSwKvTqrSzP7ZxQQ+wf8rtoIObafBlVnH1iYwGzU1vwIKTn0oVcgabFThOJbTr9bez6zQ==
+    size: 155705997
+  - url: Meeting-Notes-Coder-1.0.0-arm64.dmg
+    sha512: e2ZVYzstqsqN7yA+qIVAfWVqHxqsyBzxPTC/JAOgOBZYCEAHRGKNc6aZtD54+w11ewn9DyBgoto5cTTTcwdR7g==
+    size: 151093690
+path: Meeting-Notes-Coder-1.0.0.dmg
+sha512: DOoOsPPkIeRSz2rd5JSwKvTqrSzP7ZxQQ+wf8rtoIObafBlVnH1iYwGzU1vwIKTn0oVcgabFThOJbTr9bez6zQ==
+releaseDate: '2025-10-28T07:02:26.727Z'

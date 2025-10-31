@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Diagnostic reports
+report.*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+*.lcov
+
+# Build output
+dist/
+build/
+.next/
+.nuxt/
+out/
+.parcel-cache/
+.svelte-kit/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# Package managers
+jspm_packages/
+.cache/
+
+# TypeScript
+*.tsbuildinfo
+
+# Tests
+.nyc_output/
+
+# IDE and editor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.iml
+
+# OS generated
+.DS_Store
+Thumbs.db
+
