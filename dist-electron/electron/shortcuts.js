@@ -33,21 +33,6 @@ class ShortcutsHelper {
         electron_1.globalShortcut.register("CommandOrControl+Enter", async () => {
             await this.appState.processingHelper.processScreenshots();
         });
-        electron_1.globalShortcut.register("CommandOrControl+R", () => {
-            console.log("Command + R pressed. Canceling requests and resetting queues...");
-            // Cancel ongoing API requests
-            this.appState.processingHelper.cancelOngoingRequests();
-            // Clear both screenshot queues
-            this.appState.clearQueues();
-            console.log("Cleared queues.");
-            // Update the view state to 'queue'
-            this.appState.setView("queue");
-            // Notify renderer process to switch view to 'queue'
-            const mainWindow = this.appState.getMainWindow();
-            if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send("reset-view");
-            }
-        });
         // New shortcuts for moving the window
         electron_1.globalShortcut.register("CommandOrControl+Left", () => {
             console.log("Command/Ctrl + Left pressed. Moving window left.");
@@ -79,6 +64,42 @@ class ShortcutsHelper {
                             mainWindow.setAlwaysOnTop(true, "floating");
                         }
                     }, 100);
+                }
+            }
+        });
+        // Realtime hearing toggle shortcut
+        electron_1.globalShortcut.register("CommandOrControl+K", () => {
+            const mainWindow = this.appState.getMainWindow();
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                console.log("⌘K pressed - Toggling realtime hearing");
+                mainWindow.webContents.send("toggle-realtime-hearing");
+            }
+        });
+        // Realtime answer generation shortcut (⌘R)
+        // Note: This conflicts with the reset shortcut, but ⌘R will trigger answer generation
+        // when realtime is connected, otherwise it will reset queues
+        electron_1.globalShortcut.register("CommandOrControl+R", () => {
+            const mainWindow = this.appState.getMainWindow();
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                const sessionState = this.appState.processingHelper.getRealtimeSessionState();
+                if (sessionState === "connected") {
+                    console.log("⌘R pressed - Generating realtime answer");
+                    mainWindow.webContents.send("realtime-answer-now");
+                }
+                else {
+                    // Fallback to original reset behavior if realtime is not connected
+                    console.log("Command + R pressed. Canceling requests and resetting queues...");
+                    // Cancel ongoing API requests
+                    this.appState.processingHelper.cancelOngoingRequests();
+                    // Clear both screenshot queues
+                    this.appState.clearQueues();
+                    console.log("Cleared queues.");
+                    // Update the view state to 'queue'
+                    this.appState.setView("queue");
+                    // Notify renderer process to switch view to 'queue'
+                    if (!mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send("reset-view");
+                    }
                 }
             }
         });

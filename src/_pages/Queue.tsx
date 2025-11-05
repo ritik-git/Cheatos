@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react"
+import React, { useState, useEffect, useRef, useCallback } from "react"
 import { useQuery } from "react-query"
 import ScreenshotQueue from "../components/Queue/ScreenshotQueue"
 import {
@@ -28,15 +28,131 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
   const contentRef = useRef<HTMLDivElement>(null)
 
   const [chatInput, setChatInput] = useState("")
-  const [chatMessages, setChatMessages] = useState<{role: "user"|"gemini", text: string}[]>([])
+  const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [isChatOpen, setIsChatOpen] = useState(false)
   const chatInputRef = useRef<HTMLInputElement>(null)
   
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [currentModel, setCurrentModel] = useState<{ provider: string; model: string }>({ provider: "gemini", model: "gemini-2.0-flash" })
+  const [currentModel, setCurrentModel] = useState<{ provider: "ollama" | "gemini" | "openai"; model: string }>({ provider: "openai", model: "gpt-4o-mini" })
 
   const barRef = useRef<HTMLDivElement>(null)
+
+  const [realtimeTranscript, setRealtimeTranscript] = useState<{ text: string; isFinal: boolean } | null>(null)
+  const [realtimeInsightDraft, setRealtimeInsightDraft] = useState<string | null>(null)
+  const [realtimeStatus, setRealtimeStatus] = useState<string | null>(null)
+  const [realtimeAnswers, setRealtimeAnswers] = useState<Array<{ text: string; timestamp: number }>>([])
+  const [realtimeConnected, setRealtimeConnected] = useState(false)
+  const [realtimeHearingPaused, setRealtimeHearingPaused] = useState(false)
+  const [realtimeAnswerMode, setRealtimeAnswerMode] = useState<"auto" | "manual">("manual")
+  const [transcriptionStatus, setTranscriptionStatus] = useState<string | null>(null)
+  const [transcriptionResult, setTranscriptionResult] = useState<{ text: string; timestamp: number } | null>(null)
+  const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
+  const [transcriptionActive, setTranscriptionActive] = useState(false)
+  const [transcriptionDurationMs, setTranscriptionDurationMs] = useState<number | null>(null)
+  const transcriptionStartedAtRef = useRef<number | null>(null)
+  const processedTranscriptIds = useRef<Set<string>>(new Set())
+  const processedResponseIds = useRef<Set<string>>(new Set())
+  const lastFinalTranscriptRef = useRef<string>("")
+  const fallbackInFlightRef = useRef(false)
+  const realtimeCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const realtimeCloseRequestedRef = useRef(false)
+
+  const triggerTranscriptFallback = useCallback(async () => {
+    if (fallbackInFlightRef.current) return
+    const transcript = lastFinalTranscriptRef.current.trim()
+    if (!transcript) return
+
+    fallbackInFlightRef.current = true
+    setRealtimeStatus("Generating answer from transcript…")
+    setChatLoading(true)
+    setIsChatOpen(true)
+    try {
+      const response = await window.electronAPI.invoke("gemini-chat", transcript)
+      const text = typeof response === "string" ? response : String(response ?? "")
+      if (text.trim()) {
+        setChatMessages((messages) => [...messages, { role: "assistant", text }])
+      }
+    } catch (error: any) {
+      const message = `Transcript fallback failed: ${error?.message ?? String(error)}`
+      console.error("[Realtime] Fallback error", error)
+      setChatMessages((messages) => [...messages, { role: "assistant", text: message }])
+    } finally {
+      setChatLoading(false)
+      fallbackInFlightRef.current = false
+    }
+  }, [])
+
+  const scheduleRealtimeClose = useCallback((delay = 750) => {
+    if (realtimeCloseRequestedRef.current) return
+    realtimeCloseRequestedRef.current = true
+    if (realtimeCloseTimeoutRef.current) {
+      clearTimeout(realtimeCloseTimeoutRef.current)
+    }
+    realtimeCloseTimeoutRef.current = setTimeout(() => {
+      window.electronAPI
+        .stopOpenAIRealtimeSession({ close: true })
+        .catch((error: any) => {
+          console.warn("[Realtime] Failed to close session:", error)
+        })
+        .finally(() => {
+          realtimeCloseRequestedRef.current = false
+          realtimeCloseTimeoutRef.current = null
+        })
+    }, delay)
+  }, [])
+
+  const handleTranscriptionStart = useCallback(() => {
+    transcriptionStartedAtRef.current = performance.now()
+    setTranscriptionActive(true)
+    setTranscriptionResult(null)
+    setTranscriptionError(null)
+    setTranscriptionDurationMs(null)
+    setTranscriptionStatus("Preparing microphone…")
+    // setRealtimeAnswer removed - using realtimeAnswers array now
+  }, [])
+
+  const handleTranscriptionStatusChange = useCallback((status: string | null) => {
+    setTranscriptionStatus(status)
+    if (!status) {
+      setTranscriptionActive(false)
+      return
+    }
+
+    const normalized = status.toLowerCase()
+    const terminalTokens = ["ready", "failed", "error", "unavailable", "captured"]
+    const isTerminal = terminalTokens.some((token) => normalized.includes(token))
+    setTranscriptionActive(!isTerminal)
+  }, [])
+
+  const handleTranscriptionResult = useCallback((result: { text: string; timestamp: number }) => {
+    setTranscriptionResult(result)
+    setTranscriptionError(null)
+    setTranscriptionActive(false)
+    const startedAt = transcriptionStartedAtRef.current
+    if (typeof startedAt === "number") {
+      setTranscriptionDurationMs(performance.now() - startedAt)
+    }
+    transcriptionStartedAtRef.current = null
+  }, [])
+
+  const handleTranscriptionError = useCallback((message: string) => {
+    setTranscriptionError(message)
+    setTranscriptionActive(false)
+    const startedAt = transcriptionStartedAtRef.current
+    if (typeof startedAt === "number") {
+      setTranscriptionDurationMs(performance.now() - startedAt)
+    }
+    transcriptionStartedAtRef.current = null
+  }, [])
+
+  const showTranscriptionPanel = Boolean(
+    transcriptionStatus || transcriptionResult || transcriptionError || transcriptionActive
+  )
+
+  const showRealtimeAnswerPanel = Boolean(
+    realtimeStatus || realtimeAnswers.length > 0 || realtimeInsightDraft || realtimeConnected
+  )
 
   const { data: screenshots = [], refetch } = useQuery<Array<{ path: string; preview: string }>, Error>(
     ["screenshots"],
@@ -67,6 +183,18 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
     setToastOpen(true)
   }
 
+  const getProviderIcon = (provider: "ollama" | "gemini" | "openai") => {
+    if (provider === "ollama") return "🏠"
+    if (provider === "openai") return "⚡"
+    return "☁️"
+  }
+
+  const getProviderDisplayName = (provider: "ollama" | "gemini" | "openai") => {
+    if (provider === "ollama") return "Ollama"
+    if (provider === "openai") return "ChatGPT"
+    return "Gemini"
+  }
+
   const handleDeleteScreenshot = async (index: number) => {
     const screenshotToDelete = screenshots[index]
 
@@ -93,9 +221,9 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
     setChatInput("")
     try {
       const response = await window.electronAPI.invoke("gemini-chat", chatInput)
-      setChatMessages((msgs) => [...msgs, { role: "gemini", text: response }])
+      setChatMessages((msgs) => [...msgs, { role: "assistant", text: response }])
     } catch (err) {
-      setChatMessages((msgs) => [...msgs, { role: "gemini", text: "Error: " + String(err) }])
+      setChatMessages((msgs) => [...msgs, { role: "assistant", text: "Error: " + String(err) }])
     } finally {
       setChatLoading(false)
       chatInputRef.current?.focus()
@@ -114,6 +242,247 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
     };
     loadCurrentModel();
   }, []);
+
+  useEffect(() => {
+    console.log("[Queue] Realtime status updated", { realtimeStatus })
+  }, [realtimeStatus])
+
+  useEffect(() => {
+    if (realtimeTranscript) {
+      console.log("[Queue] Realtime transcript update", {
+        text: realtimeTranscript.text,
+        isFinal: realtimeTranscript.isFinal
+      })
+    }
+  }, [realtimeTranscript])
+
+  useEffect(() => {
+    if (currentModel.provider === "openai") return
+    setTranscriptionStatus(null)
+    setTranscriptionResult(null)
+    setTranscriptionError(null)
+    setTranscriptionDurationMs(null)
+    setTranscriptionActive(false)
+    transcriptionStartedAtRef.current = null
+  }, [currentModel.provider])
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onOpenAIRealtimeEvent((payload: any) => {
+      if (!payload || typeof payload !== "object") return
+
+      const kind = payload.kind
+
+      console.log("[Queue] Realtime event received", {
+        kind,
+        payload
+      })
+
+      switch (kind) {
+        case "transcript": {
+          const text = typeof payload.text === "string" ? payload.text : ""
+          const itemId = typeof payload.itemId === "string" ? payload.itemId : undefined
+          const isFinal = Boolean(payload.isFinal)
+
+          if (text || isFinal) {
+            setRealtimeTranscript({ text, isFinal })
+          }
+
+          if (isFinal) {
+            if (itemId) {
+              if (processedTranscriptIds.current.has(itemId)) break
+              processedTranscriptIds.current.add(itemId)
+            }
+
+            const trimmed = text.trim()
+            if (trimmed) {
+              lastFinalTranscriptRef.current = trimmed
+              setChatMessages((messages) => [...messages, { role: "user", text: trimmed }])
+            }
+          }
+          break
+        }
+
+        case "insight": {
+          const text = typeof payload.text === "string" ? payload.text : ""
+          const responseId = typeof payload.responseId === "string" ? payload.responseId : undefined
+          const isFinal = Boolean(payload.isFinal)
+
+          console.log("[Queue] Insight event received", {
+            isFinal,
+            textLength: text.length,
+            responseId,
+            preview: text.slice(0, 100),
+            chatOpen: isChatOpen
+          })
+
+          if (isFinal) {
+            // Check for duplicates using responseId if available, otherwise use text hash
+            const duplicateKey = responseId || `text_${text.slice(0, 50)}`
+            if (processedResponseIds.current.has(duplicateKey)) {
+              console.log("[Queue] Duplicate final insight ignored", { responseId, duplicateKey })
+              break
+            }
+            processedResponseIds.current.add(duplicateKey)
+
+            const trimmed = text.trim()
+            if (trimmed) {
+              console.log("[Queue] Adding realtime answer", {
+                textLength: trimmed.length,
+                preview: trimmed.slice(0, 100),
+                responseId
+              })
+              // Store in realtimeAnswers array (keep last 10) - only in auto mode or when manually triggered
+              setRealtimeAnswers((prev) => {
+                const newAnswers = [{ text: trimmed, timestamp: Date.now() }, ...prev]
+                return newAnswers.slice(0, 10) // Keep only last 10 answers
+              })
+            }
+            setRealtimeInsightDraft(null)
+            setRealtimeStatus(realtimeAnswerMode === "manual" ? "Ready - Click 'Answer Now' or press ⌘R" : "Ready - Ask another question")
+            // Don't auto-close the connection - keep it open for continuous conversation
+            // scheduleRealtimeClose()
+          } else {
+            // For streaming updates, always update the draft
+            setRealtimeInsightDraft(text)
+            setRealtimeStatus("Analyzing conversation…")
+          }
+          setChatLoading(false)
+          break
+        }
+
+        case "connected": {
+          processedTranscriptIds.current.clear()
+          processedResponseIds.current.clear()
+          setRealtimeTranscript(null)
+          setRealtimeInsightDraft(null)
+          setChatLoading(false)
+          setRealtimeConnected(true)
+          setRealtimeHearingPaused(false)
+          // Set mode on backend when connecting
+          window.electronAPI.setRealtimeResponseMode(realtimeAnswerMode).catch(console.error)
+          setRealtimeStatus(realtimeAnswerMode === "manual" ? "Connected - Speak now, then click 'Answer Now' or press ⌘R" : "Connected - Speak now")
+          if (realtimeCloseTimeoutRef.current) {
+            clearTimeout(realtimeCloseTimeoutRef.current)
+            realtimeCloseTimeoutRef.current = null
+          }
+          realtimeCloseRequestedRef.current = false
+          break
+        }
+
+        case "disconnected": {
+          setRealtimeInsightDraft(null)
+          setChatLoading(false)
+          setRealtimeConnected(false)
+          setRealtimeStatus("Disconnected")
+          setRealtimeTranscript(null)
+          if (realtimeCloseTimeoutRef.current) {
+            clearTimeout(realtimeCloseTimeoutRef.current)
+            realtimeCloseTimeoutRef.current = null
+          }
+          realtimeCloseRequestedRef.current = false
+          break
+        }
+
+        case "error": {
+          const message = typeof payload.message === "string" ? payload.message : "Realtime error"
+          const raw = payload.raw ?? {}
+          const code = raw?.error?.code
+
+          if (raw?.responseInProgress) {
+            setRealtimeStatus("Still processing your previous request…")
+            setChatLoading(true)
+            break
+          }
+
+          if (typeof raw?.bufferedSamples === "number") {
+            setRealtimeStatus("I need a little more audio (at least 0.1s) before I can help.")
+            setChatLoading(false)
+            void triggerTranscriptFallback()
+            scheduleRealtimeClose(250)
+            break
+          }
+
+          if (code === "input_audio_buffer_commit_empty") {
+            setRealtimeInsightDraft(null)
+            setChatLoading(false)
+            setRealtimeStatus("I need a little more audio (at least 0.1s) before I can help.")
+            void triggerTranscriptFallback()
+            scheduleRealtimeClose(250)
+            break
+          }
+
+          if (code === "conversation_already_has_active_response") {
+            setRealtimeStatus("Still processing your previous request…")
+            setChatLoading(true)
+            break
+          }
+
+          console.error("[Realtime] Error event", payload)
+          setRealtimeInsightDraft(null)
+          setChatLoading(false)
+          setRealtimeStatus(message)
+          setToastMessage({ title: "Realtime Error", description: message, variant: "error" })
+          setToastOpen(true)
+          break
+        }
+        default:
+          break
+      }
+    })
+
+    return () => {
+      if (unsubscribe) {
+        unsubscribe()
+      }
+    }
+  }, [scheduleRealtimeClose, triggerTranscriptFallback, isChatOpen, realtimeAnswerMode])
+
+  // Keyboard shortcut for toggling hearing (⌘K)
+  useEffect(() => {
+    const handleToggleHearing = () => {
+      if (!realtimeConnected) return
+      const toggleFn = (window as any).__toggleRealtimeHearing
+      if (typeof toggleFn === 'function') {
+        toggleFn()
+      }
+    }
+
+    const unsubscribe = (window.electronAPI as any).onToggleRealtimeHearing?.(handleToggleHearing)
+    return () => {
+      if (unsubscribe) unsubscribe()
+    }
+  }, [realtimeConnected])
+
+  // Keyboard shortcut for generating answer (⌘R)
+  useEffect(() => {
+    const handleAnswerNow = async () => {
+      if (!realtimeConnected || chatLoading) return
+      try {
+        const result = await window.electronAPI.createRealtimeResponse()
+        if (!result.success) {
+          setRealtimeStatus(result.error || "Failed to generate answer")
+        }
+      } catch (error: any) {
+        console.error("[Queue] Failed to create response:", error)
+        setRealtimeStatus(`Error: ${error?.message || String(error)}`)
+      }
+    }
+
+    const unsubscribe = window.electronAPI.onRealtimeAnswerNow?.(handleAnswerNow)
+    return () => {
+      if (unsubscribe) unsubscribe()
+    }
+  }, [realtimeConnected, chatLoading])
+
+  useEffect(() => {
+    return () => {
+      if (realtimeCloseTimeoutRef.current) {
+        clearTimeout(realtimeCloseTimeoutRef.current)
+        realtimeCloseTimeoutRef.current = null
+      }
+      realtimeCloseRequestedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     const updateDimensions = () => {
@@ -177,10 +546,10 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
         if (latest) {
           // Call the LLM to process the screenshot
           const response = await window.electronAPI.invoke("analyze-image-file", latest);
-          setChatMessages((msgs) => [...msgs, { role: "gemini", text: response.text }]);
+          setChatMessages((msgs) => [...msgs, { role: "assistant", text: response.text }]);
         }
       } catch (err) {
-        setChatMessages((msgs) => [...msgs, { role: "gemini", text: "Error: " + String(err) }]);
+        setChatMessages((msgs) => [...msgs, { role: "assistant", text: "Error: " + String(err) }]);
       } finally {
         setChatLoading(false);
       }
@@ -203,14 +572,19 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
     setIsSettingsOpen(!isSettingsOpen)
   }
 
-  const handleModelChange = (provider: "ollama" | "gemini", model: string) => {
+  const handleModelChange = (provider: "ollama" | "gemini" | "openai", model: string) => {
     setCurrentModel({ provider, model })
     // Update chat messages to reflect the model change
-    const modelName = provider === "ollama" ? model : "Gemini 2.0 Flash"
-    setChatMessages((msgs) => [...msgs, { 
-      role: "gemini", 
-      text: `🔄 Switched to ${provider === "ollama" ? "🏠" : "☁️"} ${modelName}. Ready for your questions!` 
-    }])
+    const icon = getProviderIcon(provider)
+    const name = getProviderDisplayName(provider)
+    const modelName = provider === "ollama" ? model : model
+    setChatMessages((msgs) => [
+      ...msgs,
+      {
+        role: "assistant",
+        text: `🔄 Switched to ${icon} ${name} (${modelName}). Ready for your questions!`
+      }
+    ])
   }
 
 
@@ -241,6 +615,37 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
               onTooltipVisibilityChange={handleTooltipVisibilityChange}
               onChatToggle={handleChatToggle}
               onSettingsToggle={handleSettingsToggle}
+              currentProvider={currentModel.provider}
+              realtimeTranscript={realtimeTranscript}
+              realtimeStatus={realtimeStatus}
+              realtimeConnected={realtimeConnected}
+              realtimeHearingPaused={realtimeHearingPaused}
+              onRealtimeHearingToggle={async () => {
+                try {
+                  if (realtimeHearingPaused) {
+                    // Resume hearing
+                    if ((window.electronAPI as any).resumeRealtimeHearing) {
+                      await (window.electronAPI as any).resumeRealtimeHearing()
+                    }
+                    setRealtimeHearingPaused(false)
+                    setRealtimeStatus("Hearing resumed - Speak now")
+                  } else {
+                    // Pause hearing
+                    if ((window.electronAPI as any).pauseRealtimeHearing) {
+                      await (window.electronAPI as any).pauseRealtimeHearing()
+                    }
+                    setRealtimeHearingPaused(true)
+                    setRealtimeStatus("Hearing paused - Press ⌘K to resume")
+                  }
+                } catch (error: any) {
+                  console.error("[Queue] Failed to toggle hearing:", error)
+                }
+              }}
+              onRealtimeStatusChange={setRealtimeStatus}
+              onTranscriptionStart={handleTranscriptionStart}
+              onTranscriptionStatusChange={handleTranscriptionStatusChange}
+              onTranscriptionResult={handleTranscriptionResult}
+              onTranscriptionError={handleTranscriptionError}
             />
           </div>
           {/* Conditional Settings Interface */}
@@ -255,12 +660,12 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
             <div className="mt-4 w-full mx-auto liquid-glass chat-container p-4 flex flex-col">
             <div className="flex-1 overflow-y-auto mb-3 p-3 rounded-lg bg-white/10 backdrop-blur-md max-h-64 min-h-[120px] glass-content border border-white/20 shadow-lg">
               {chatMessages.length === 0 ? (
-                <div className="text-sm text-gray-600 text-center mt-8">
-                  💬 Chat with {currentModel.provider === "ollama" ? "🏠" : "☁️"} {currentModel.model}
+                <div className="text-sm text-white/70 text-center mt-8">
+                  💬 Chat with {getProviderIcon(currentModel.provider)} {getProviderDisplayName(currentModel.provider)} ({currentModel.model})
                   <br />
-                  <span className="text-xs text-gray-500">Take a screenshot (Cmd+H) for automatic analysis</span>
+                  <span className="text-xs text-white/50">Take a screenshot (Cmd+H) for automatic analysis</span>
                   <br />
-                  <span className="text-xs text-gray-500">Click ⚙️ Models to switch AI providers</span>
+                  <span className="text-xs text-white/50">Click ⚙️ Models to switch AI providers</span>
                 </div>
               ) : (
                 chatMessages.map((msg, idx) => (
@@ -271,8 +676,8 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
                     <div
                       className={`max-w-[80%] px-3 py-1.5 rounded-xl text-xs shadow-md backdrop-blur-sm border ${
                         msg.role === "user" 
-                          ? "bg-gray-700/80 text-gray-100 ml-12 border-gray-600/40" 
-                          : "bg-white/85 text-gray-700 mr-12 border-gray-200/50"
+                        ? "bg-white/15 text-white ml-12 border-white/30" 
+                        : "bg-black/35 text-white/90 mr-12 border-white/20"
                       }`}
                       style={{ wordBreak: "break-word", lineHeight: "1.4" }}
                     >
@@ -283,11 +688,11 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
               )}
               {chatLoading && (
                 <div className="flex justify-start mb-3">
-                  <div className="bg-white/85 text-gray-600 px-3 py-1.5 rounded-xl text-xs backdrop-blur-sm border border-gray-200/50 shadow-md mr-12">
+                  <div className="bg-white/12 text-white/70 px-3 py-1.5 rounded-xl text-xs backdrop-blur-sm border border-white/20 shadow-md mr-12">
                     <span className="inline-flex items-center">
-                      <span className="animate-pulse text-gray-400">●</span>
-                      <span className="animate-pulse animation-delay-200 text-gray-400">●</span>
-                      <span className="animate-pulse animation-delay-400 text-gray-400">●</span>
+                      <span className="animate-pulse text-white/60">●</span>
+                      <span className="animate-pulse animation-delay-200 text-white/60">●</span>
+                      <span className="animate-pulse animation-delay-400 text-white/60">●</span>
                       <span className="ml-2">{currentModel.model} is replying...</span>
                     </span>
                   </div>
@@ -303,7 +708,7 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
             >
               <input
                 ref={chatInputRef}
-                className="flex-1 rounded-lg px-3 py-2 bg-white/25 backdrop-blur-md text-gray-800 placeholder-gray-500 text-xs focus:outline-none focus:ring-1 focus:ring-gray-400/60 border border-white/40 shadow-lg transition-all duration-200"
+                className="flex-1 rounded-lg px-3 py-2 bg-white/10 backdrop-blur-md text-white placeholder-white/60 text-xs focus:outline-none focus:ring-1 focus:ring-white/40 border border-white/25 shadow-lg transition-all duration-200"
                 placeholder="Type your message..."
                 value={chatInput}
                 onChange={e => setChatInput(e.target.value)}
@@ -311,7 +716,7 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
               />
               <button
                 type="submit"
-                className="p-2 rounded-lg bg-gray-600/80 hover:bg-gray-700/80 border border-gray-500/60 flex items-center justify-center transition-all duration-200 backdrop-blur-sm shadow-lg disabled:opacity-50"
+                className="p-2 rounded-lg bg-black/60 hover:bg-black/70 border border-white/25 flex items-center justify-center transition-all duration-200 backdrop-blur-sm shadow-lg disabled:opacity-50"
                 disabled={chatLoading || !chatInput.trim()}
                 tabIndex={-1}
                 aria-label="Send"
@@ -322,6 +727,163 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
               </button>
             </form>
           </div>
+          )}
+
+          {showTranscriptionPanel && (
+            <div className="mt-4 w-full mx-auto liquid-glass chat-container p-4 flex flex-col gap-3">
+              <div className="flex items-center justify-between text-xs glass-content">
+                <span className="uppercase tracking-[0.28em] text-white/70">GPT-5 Mini</span>
+                {transcriptionDurationMs != null && (
+                  <span className="text-white/60 tracking-normal">
+                    {(transcriptionDurationMs / 1000).toFixed(1)}s
+                  </span>
+                )}
+              </div>
+              {transcriptionStatus && (
+                <div className="glass-content text-[12px] text-white/75 bg-white/10 border border-white/15 rounded-lg px-3 py-2 flex items-center gap-2">
+                  {transcriptionActive && (
+                    <span className="flex h-2 w-2 animate-pulse rounded-full bg-white/70" />
+                  )}
+                  <span>{transcriptionStatus}</span>
+                </div>
+              )}
+              <div className="glass-content text-sm text-white/90 whitespace-pre-wrap leading-relaxed bg-black/30 border border-white/15 rounded-lg px-3 py-3 min-h-[96px]">
+                {transcriptionError ? (
+                  <span className="text-red-300">{transcriptionError}</span>
+                ) : transcriptionResult ? (
+                  transcriptionResult.text ? (
+                    transcriptionResult.text
+                  ) : (
+                    <span className="text-white/60 italic">No content returned.</span>
+                  )
+                ) : (
+                  <span className="text-white/60 italic">Waiting for GPT-5 Mini response…</span>
+                )}
+              </div>
+              {transcriptionResult?.timestamp && (
+                <div className="glass-content text-[11px] text-white/50 flex items-center justify-between">
+                  <span>Captured {new Date(transcriptionResult.timestamp).toLocaleTimeString()}</span>
+                  {transcriptionResult.text && (
+                    <span className="text-white/40">Press ⌘C to copy from here</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {showRealtimeAnswerPanel && (
+            <div className="mt-4 w-full mx-auto liquid-glass chat-container p-4 flex flex-col gap-3">
+              <div className="flex items-center justify-between text-xs glass-content">
+                <span className="uppercase tracking-[0.28em] text-white/70">🔊 Realtime Audio</span>
+                <div className="flex items-center gap-2">
+                  {realtimeConnected && (
+                    <>
+                      {realtimeHearingPaused ? (
+                        <span className="text-yellow-400 text-[10px] flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-400"></span>
+                          Hearing Paused
+                        </span>
+                      ) : (
+                        <span className="text-green-400 text-[10px] flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+                          Connected
+                        </span>
+                      )}
+                      <select
+                        value={realtimeAnswerMode}
+                        onChange={async (e) => {
+                          const newMode = e.target.value as "auto" | "manual"
+                          setRealtimeAnswerMode(newMode)
+                          await window.electronAPI.setRealtimeResponseMode(newMode)
+                        }}
+                        className="bg-white/10 hover:bg-white/20 border border-white/25 rounded-md px-2 py-1 text-[10px] text-white/70 focus:outline-none focus:ring-1 focus:ring-white/40 transition-colors"
+                      >
+                        <option value="auto">Auto</option>
+                        <option value="manual">Manual</option>
+                      </select>
+                      {(realtimeAnswerMode === "manual" || realtimeTranscript?.text) && (
+                        <button
+                          onClick={async () => {
+                            try {
+                              const result = await window.electronAPI.createRealtimeResponse()
+                              if (!result.success) {
+                                setRealtimeStatus(result.error || "Failed to generate answer")
+                              }
+                            } catch (error: any) {
+                              console.error("[Queue] Failed to create response:", error)
+                              setRealtimeStatus(`Error: ${error?.message || String(error)}`)
+                            }
+                          }}
+                          disabled={!realtimeConnected || chatLoading}
+                          className="bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors rounded-md px-2 py-1 text-[10px] leading-none text-white/70 flex items-center gap-1"
+                          title="Generate answer (⌘R)"
+                        >
+                          Answer Now
+                        </button>
+                      )}
+                      {realtimeConnected && (
+                        <button
+                          onClick={async () => {
+                            const toggleFn = (window as any).__toggleRealtimeHearing
+                            if (typeof toggleFn === 'function') {
+                              toggleFn()
+                            }
+                          }}
+                          className="bg-white/10 hover:bg-white/20 transition-colors rounded-md px-2 py-1 text-[10px] leading-none text-white/70 flex items-center gap-1"
+                          title={realtimeHearingPaused ? "Resume hearing (⌘K)" : "Pause hearing (⌘K)"}
+                        >
+                          {realtimeHearingPaused ? "▶ Resume" : "⏸ Pause"}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+              {realtimeStatus && (
+                <div className="glass-content text-[12px] text-white/75 bg-white/10 border border-white/15 rounded-lg px-3 py-2 flex items-center gap-2">
+                  {realtimeInsightDraft && realtimeAnswers.length === 0 && (
+                    <span className="flex h-2 w-2 animate-pulse rounded-full bg-green-400" />
+                  )}
+                  <span>{realtimeStatus}</span>
+                </div>
+              )}
+              <div className="glass-content text-sm text-white/90 whitespace-pre-wrap leading-relaxed bg-black/30 border border-white/15 rounded-lg px-3 py-3 max-h-[400px] overflow-y-auto">
+                {realtimeInsightDraft && realtimeAnswers.length === 0 ? (
+                  <span>
+                    {realtimeInsightDraft}
+                    <span className="animate-pulse">▋</span>
+                  </span>
+                ) : realtimeAnswers.length > 0 ? (
+                  <div className="space-y-4">
+                    {realtimeAnswers.map((answer, idx) => (
+                      <div key={answer.timestamp} className="border-b border-white/10 pb-3 last:border-0 last:pb-0">
+                        <div className="text-[10px] text-white/50 mb-1">
+                          {new Date(answer.timestamp).toLocaleTimeString()} {idx === 0 && realtimeInsightDraft && "(Current)"}
+                        </div>
+                        <div className="text-white/90">{answer.text}</div>
+                      </div>
+                    ))}
+                    {realtimeInsightDraft && (
+                      <div className="border-t border-white/10 pt-3">
+                        <div className="text-[10px] text-white/50 mb-1">Streaming...</div>
+                        <div>
+                          {realtimeInsightDraft}
+                          <span className="animate-pulse">▋</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-white/60 italic">Waiting for realtime response…</span>
+                )}
+              </div>
+              {realtimeAnswers.length > 0 && (
+                <div className="glass-content text-[11px] text-white/50 flex items-center justify-between">
+                  <span>{realtimeAnswers.length} answer{realtimeAnswers.length !== 1 ? 's' : ''} received</span>
+                  <span className="text-white/40">Press ⌘C to copy</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

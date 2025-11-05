@@ -108,13 +108,13 @@ export const ComplexitySection = ({
     ) : (
       <div className="space-y-1">
         <div className="flex items-start gap-2 text-[13px] leading-[1.4] text-gray-100">
-          <div className="w-1 h-1 rounded-full bg-blue-400/80 mt-2 shrink-0" />
+                                  <div className="w-1 h-1 rounded-full bg-white/60 mt-2 shrink-0" />
           <div>
             <strong>Time:</strong> {timeComplexity}
           </div>
         </div>
         <div className="flex items-start gap-2 text-[13px] leading-[1.4] text-gray-100">
-          <div className="w-1 h-1 rounded-full bg-blue-400/80 mt-2 shrink-0" />
+                          <div className="w-1 h-1 rounded-full bg-white/60 mt-2 shrink-0" />
           <div>
             <strong>Space:</strong> {spaceComplexity}
           </div>
@@ -528,7 +528,7 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
                                       key={index}
                                       className="flex items-start gap-2"
                                     >
-                                      <div className="w-1 h-1 rounded-full bg-blue-400/80 mt-2 shrink-0" />
+                                      <div className="w-1 h-1 rounded-full bg-white/60 mt-2 shrink-0" />
                                       <div>{thought}</div>
                                     </div>
                                   ))}

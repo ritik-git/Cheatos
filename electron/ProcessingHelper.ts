@@ -2,6 +2,8 @@
 
 import { AppState } from "./main"
 import { LLMHelper } from "./LLMHelper"
+import { OpenAIRealtimeClient, RealtimeConnectionEvent, RealtimeErrorEvent, RealtimeInsightEvent, RealtimeTranscriptEvent } from "./OpenAIRealtimeClient"
+import { PROMPTS } from "../shared/prompt"
 import dotenv from "dotenv"
 
 dotenv.config()
@@ -13,8 +15,11 @@ const MOCK_API_WAIT_TIME = Number(process.env.MOCK_API_WAIT_TIME) || 500
 export class ProcessingHelper {
   private appState: AppState
   private llmHelper: LLMHelper
+  private openaiRealtimeClient: OpenAIRealtimeClient | null = null
+  private openaiApiKey?: string
   private currentProcessingAbortController: AbortController | null = null
   private currentExtraProcessingAbortController: AbortController | null = null
+  private realtimeSessionState: "idle" | "connecting" | "connected" | "disconnected" = "idle"
 
   constructor(appState: AppState) {
     this.appState = appState
@@ -23,17 +28,43 @@ export class ProcessingHelper {
     const useOllama = process.env.USE_OLLAMA === "true"
     const ollamaModel = process.env.OLLAMA_MODEL // Don't set default here, let LLMHelper auto-detect
     const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434"
-    
-    if (useOllama) {
-      console.log("[ProcessingHelper] Initializing with Ollama")
-      this.llmHelper = new LLMHelper(undefined, true, ollamaModel, ollamaUrl)
-    } else {
-      const apiKey = process.env.GEMINI_API_KEY
-      if (!apiKey) {
-        throw new Error("GEMINI_API_KEY not found in environment variables. Set GEMINI_API_KEY or enable Ollama with USE_OLLAMA=true")
+    const openaiApiKey = process.env.OPENAI_API_KEY
+    const geminiApiKey = process.env.GEMINI_API_KEY
+    const openaiTranscriptionResponseModel = process.env.OPENAI_TRANSCRIPTION_RESPONSE_MODEL
+
+    let openaiTranscriptionModel = process.env.OPENAI_TRANSCRIPTION_MODEL
+    if (!openaiTranscriptionModel && openaiTranscriptionResponseModel) {
+      if (/transcribe|whisper|realtime/i.test(openaiTranscriptionResponseModel)) {
+        openaiTranscriptionModel = openaiTranscriptionResponseModel
       }
-      console.log("[ProcessingHelper] Initializing with Gemini")
-      this.llmHelper = new LLMHelper(apiKey, false)
+    }
+
+    this.openaiApiKey = openaiApiKey
+
+    if (!openaiApiKey && !geminiApiKey && !useOllama) {
+      throw new Error(
+        "No LLM provider configured. Set OPENAI_API_KEY, GEMINI_API_KEY, or enable Ollama with USE_OLLAMA=true"
+      )
+    }
+
+    this.llmHelper = new LLMHelper({
+      openaiApiKey,
+      geminiApiKey,
+      useOllama,
+      ollamaModel: ollamaModel || undefined,
+      ollamaUrl,
+      preferredProvider: geminiApiKey ? "gemini" : useOllama ? "ollama" : "openai",
+      openaiRealtimeModel: process.env.OPENAI_REALTIME_MODEL,
+      openaiTranscriptionModel: openaiTranscriptionModel || undefined,
+      openaiTranscriptionResponseModel: openaiTranscriptionResponseModel || undefined
+    })
+
+    console.log(
+      `[ProcessingHelper] Initialized provider ${this.llmHelper.getCurrentProvider()} (${this.llmHelper.getCurrentModel()})`
+    )
+
+    if (openaiApiKey) {
+      this.initializeRealtimeClient()
     }
   }
 
@@ -159,6 +190,10 @@ export class ProcessingHelper {
     return this.llmHelper.analyzeAudioFromBase64(data, mimeType);
   }
 
+  public async processTranscript(transcript: string) {
+    return this.llmHelper.analyzeTranscriptText(transcript)
+  }
+
   // Add audio file processing method
   public async processAudioFile(filePath: string) {
     return this.llmHelper.analyzeAudioFile(filePath);
@@ -166,5 +201,314 @@ export class ProcessingHelper {
 
   public getLLMHelper() {
     return this.llmHelper;
+  }
+
+  public setContextInput(context?: string) {
+    this.llmHelper.setContextInput(context)
+    const prompt = this.llmHelper.getSystemPrompt()
+    if (this.openaiRealtimeClient && this.realtimeSessionState === "connected") {
+      try {
+        // Update instructions with audio-specific prompt when context changes
+        const contextInput = this.llmHelper.getContextInput()
+        let audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+        
+        // Validate prompt length before updating
+        const MAX_INSTRUCTIONS_LENGTH = 30000
+        if (audioInstructions.length > MAX_INSTRUCTIONS_LENGTH) {
+          console.warn(
+            `[ProcessingHelper] Updated prompt length (${audioInstructions.length} chars) exceeds recommended limit. Truncating...`
+          )
+          const taskPart = audioInstructions.includes("\n\nTask:")
+            ? audioInstructions.substring(audioInstructions.indexOf("\n\nTask:"))
+            : ""
+          const basePart = audioInstructions.substring(
+            0,
+            Math.max(0, MAX_INSTRUCTIONS_LENGTH - taskPart.length - 100)
+          )
+          audioInstructions = basePart + taskPart
+        }
+        
+        this.openaiRealtimeClient.setInstructions(audioInstructions)
+        console.log("[ProcessingHelper] Updated realtime session instructions with new context")
+      } catch (error) {
+        console.warn("[ProcessingHelper] Failed to push context to realtime session", error)
+        // If instruction update fails, session might need to be restarted
+        // But don't fail the entire operation - context is still set in LLMHelper
+      }
+    }
+
+    return {
+      context: this.llmHelper.getContextInput(),
+      prompt
+    }
+  }
+
+  public getRealtimeSessionState(): "idle" | "connecting" | "connected" | "disconnected" {
+    return this.realtimeSessionState
+  }
+
+  public getContextInput(): string | undefined {
+    return this.llmHelper.getContextInput()
+  }
+
+  public async startOpenAIRealtimeSession(options?: { instructions?: string; model?: string }): Promise<{ success: boolean; error?: string }> {
+    if (!this.ensureRealtimeClient()) {
+      return { success: false, error: "OpenAI Realtime client is not configured" }
+    }
+
+    // Prevent concurrent sessions
+    if (this.realtimeSessionState === "connected" || this.realtimeSessionState === "connecting") {
+      console.warn("[ProcessingHelper] Session already active, closing existing session first")
+      try {
+        await this.stopOpenAIRealtimeSession({ close: true })
+      } catch (error) {
+        console.warn("[ProcessingHelper] Error closing existing session:", error)
+      }
+    }
+
+    this.realtimeSessionState = "connecting"
+
+    console.log("[ProcessingHelper] Starting realtime session", {
+      instructionsProvided: Boolean(options?.instructions),
+      model: options?.model ?? this.llmHelper.getOpenAIRealtimeModel(),
+      previousState: this.realtimeSessionState
+    })
+
+    if (options?.instructions) {
+      // Validate custom instructions length
+      const MAX_INSTRUCTIONS_LENGTH = 30000
+      if (options.instructions.length > MAX_INSTRUCTIONS_LENGTH) {
+        console.warn(
+          `[ProcessingHelper] Custom instructions length (${options.instructions.length} chars) exceeds recommended limit`
+        )
+      }
+      this.openaiRealtimeClient?.setInstructions(options.instructions)
+    } else {
+      // Use audio-specific prompt for optimal audio response behavior
+      const contextInput = this.llmHelper.getContextInput()
+      let audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+      
+      // Validate prompt length
+      const MAX_INSTRUCTIONS_LENGTH = 30000
+      if (audioInstructions.length > MAX_INSTRUCTIONS_LENGTH) {
+        console.warn(
+          `[ProcessingHelper] Prompt length (${audioInstructions.length} chars) exceeds recommended limit. Truncating...`
+        )
+        const taskPart = audioInstructions.includes("\n\nTask:")
+          ? audioInstructions.substring(audioInstructions.indexOf("\n\nTask:"))
+          : ""
+        const basePart = audioInstructions.substring(
+          0,
+          Math.max(0, MAX_INSTRUCTIONS_LENGTH - taskPart.length - 100)
+        )
+        audioInstructions = basePart + taskPart
+      }
+      
+      this.openaiRealtimeClient?.setInstructions(audioInstructions)
+    }
+
+    if (options?.model) {
+      this.openaiRealtimeClient?.setModel(options.model)
+    }
+
+    try {
+      await this.openaiRealtimeClient?.connect()
+      this.realtimeSessionState = "connected"
+      return { success: true }
+    } catch (error: any) {
+      this.realtimeSessionState = "disconnected"
+      const errorMessage = error?.message ?? String(error)
+      console.error("[ProcessingHelper] Failed to start OpenAI realtime session:", errorMessage)
+      
+      // Provide user-friendly error messages
+      let userFriendlyError = errorMessage
+      if (errorMessage.includes("rate_limit") || errorMessage.includes("rate limit")) {
+        userFriendlyError = "API rate limit exceeded. Please wait a moment and try again."
+      } else if (errorMessage.includes("authentication") || errorMessage.includes("401")) {
+        userFriendlyError = "Authentication failed. Please check your OpenAI API key."
+      } else if (errorMessage.includes("network") || errorMessage.includes("ECONNREFUSED")) {
+        userFriendlyError = "Network connection failed. Please check your internet connection."
+      }
+      
+      return { success: false, error: userFriendlyError }
+    }
+  }
+
+  public async stopOpenAIRealtimeSession(options?: { close?: boolean }): Promise<{ success: boolean; error?: string; reason?: "insufficient_audio" | "busy" | "auto" }> {
+    if (!this.openaiRealtimeClient) {
+      return { success: false, error: "OpenAI Realtime client is not configured" }
+    }
+
+    console.log("[ProcessingHelper] Stopping realtime session", {
+      close: options?.close,
+      currentState: this.realtimeSessionState
+    })
+
+    try {
+      const result = await this.openaiRealtimeClient.stop({ close: options?.close })
+      if (options?.close || result.success) {
+        this.realtimeSessionState = "disconnected"
+      }
+      return { success: result.success, reason: result.reason }
+    } catch (error: any) {
+      this.realtimeSessionState = "disconnected"
+      const errorMessage = error?.message ?? String(error)
+      console.error("[ProcessingHelper] Failed to stop OpenAI realtime session:", errorMessage)
+      return { success: false, error: errorMessage }
+    }
+  }
+
+  public appendRealtimeAudioChunk(chunk: Buffer | Uint8Array): void {
+    if (!this.ensureRealtimeClient()) {
+      throw new Error("OpenAI Realtime client is not configured")
+    }
+
+    const bytes = Buffer.isBuffer(chunk) ? chunk.length : chunk.byteLength
+    console.log("[ProcessingHelper] Forwarding realtime audio chunk", {
+      bytes
+    })
+    this.openaiRealtimeClient?.appendAudioChunk(chunk)
+  }
+
+  public createRealtimeResponseManually(): { success: boolean; error?: string } {
+    if (!this.openaiRealtimeClient) {
+      return { success: false, error: "OpenAI Realtime client is not configured" }
+    }
+
+    if (this.realtimeSessionState !== "connected") {
+      return { success: false, error: "Realtime session is not connected" }
+    }
+
+    return this.openaiRealtimeClient.createResponseManually()
+  }
+
+  public setRealtimeResponseMode(mode: "auto" | "manual"): void {
+    if (!this.openaiRealtimeClient) {
+      console.warn("[ProcessingHelper] Cannot set response mode: Realtime client not initialized")
+      return
+    }
+
+    this.openaiRealtimeClient.setResponseMode(mode)
+    console.log("[ProcessingHelper] Realtime response mode set to", mode)
+  }
+
+  public getRealtimeResponseMode(): "auto" | "manual" {
+    if (!this.openaiRealtimeClient) {
+      return "auto" // Default
+    }
+
+    return this.openaiRealtimeClient.getResponseMode()
+  }
+
+  private ensureRealtimeClient(): boolean {
+    if (this.openaiRealtimeClient) return true
+    if (!this.openaiApiKey) return false
+
+    this.initializeRealtimeClient()
+    return Boolean(this.openaiRealtimeClient)
+  }
+
+  private initializeRealtimeClient(): void {
+    if (!this.openaiApiKey) return
+
+    const realtimeModel = process.env.OPENAI_REALTIME_MODEL || this.llmHelper.getOpenAIRealtimeModel()
+    const contextInput = this.llmHelper.getContextInput()
+    // Use audio-specific prompt as instructions for optimal audio response behavior
+    let audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+    
+    // Validate prompt length (OpenAI Realtime API has limits, estimate ~32k chars max)
+    // If prompt is too long, truncate while keeping essential parts
+    const MAX_INSTRUCTIONS_LENGTH = 30000 // Conservative limit
+    if (audioInstructions.length > MAX_INSTRUCTIONS_LENGTH) {
+      console.warn(
+        `[ProcessingHelper] Prompt length (${audioInstructions.length} chars) exceeds recommended limit (${MAX_INSTRUCTIONS_LENGTH}). Truncating...`
+      )
+      // Keep the beginning (role, context, rules) and the task portion
+      const taskPart = audioInstructions.includes("\n\nTask:")
+        ? audioInstructions.substring(audioInstructions.indexOf("\n\nTask:"))
+        : ""
+      const basePart = audioInstructions.substring(
+        0,
+        Math.max(0, MAX_INSTRUCTIONS_LENGTH - taskPart.length - 100)
+      )
+      audioInstructions = basePart + taskPart
+      console.warn(
+        `[ProcessingHelper] Truncated prompt to ${audioInstructions.length} chars`
+      )
+    }
+    
+    const realtimeClient = new OpenAIRealtimeClient({
+      apiKey: this.openaiApiKey,
+      model: realtimeModel,
+      instructions: audioInstructions,
+      transcription: {
+        model: "gpt-4o-mini-transcribe"
+      }
+    })
+
+    this.attachRealtimeListeners(realtimeClient)
+    this.openaiRealtimeClient = realtimeClient
+  }
+
+  private attachRealtimeListeners(client: OpenAIRealtimeClient): void {
+    client.on("connected", () => {
+      console.log("[ProcessingHelper] OpenAI realtime connected")
+      this.realtimeSessionState = "connected"
+      this.forwardRealtimeEvent({ kind: "connected" })
+    })
+
+    client.on("disconnected", (event: RealtimeConnectionEvent) => {
+      console.warn("[ProcessingHelper] OpenAI realtime disconnected", event)
+      this.realtimeSessionState = "disconnected"
+      this.forwardRealtimeEvent({ kind: "disconnected", ...event })
+    })
+
+    client.on("transcript", (event: RealtimeTranscriptEvent) => {
+      this.forwardRealtimeEvent({ kind: "transcript", ...event })
+    })
+
+    client.on("insight", (event: RealtimeInsightEvent) => {
+      console.log("[ProcessingHelper] Insight received", {
+        responseId: event.responseId,
+        textLength: event.text?.length,
+        isFinal: event.isFinal,
+        preview: event.text?.slice(0, 100)
+      })
+      this.forwardRealtimeEvent({ kind: "insight", ...event })
+    })
+
+    client.on("error", (event: RealtimeErrorEvent) => {
+      const code = (event.raw as any)?.error?.code
+      let userFriendlyMessage = event.message
+      
+      if (code === "input_audio_buffer_commit_empty") {
+        console.warn("[ProcessingHelper] OpenAI realtime reported empty audio buffer")
+        userFriendlyMessage = "Not enough audio detected. Please speak clearly."
+      } else if (code === "conversation_already_has_active_response") {
+        console.warn("[ProcessingHelper] OpenAI realtime already processing a response")
+        userFriendlyMessage = "Response is already being generated. Please wait."
+      } else if (code === "rate_limit_exceeded" || event.message.includes("rate limit")) {
+        userFriendlyMessage = "API rate limit exceeded. Please wait a moment and try again."
+      } else if (code === "invalid_api_key" || event.message.includes("authentication")) {
+        userFriendlyMessage = "Authentication failed. Please check your OpenAI API key."
+      } else if (code === "model_not_found" || event.message.includes("model")) {
+        userFriendlyMessage = "Model not available. Please check your model configuration."
+      } else {
+        console.error("[ProcessingHelper] OpenAI realtime error:", event.message, event.raw)
+        // Keep original message for unknown errors
+      }
+      
+      this.forwardRealtimeEvent({ 
+        kind: "error", 
+        message: userFriendlyMessage,
+        ...event 
+      })
+    })
+  }
+
+  private forwardRealtimeEvent(payload: Record<string, unknown>): void {
+    const mainWindow = this.appState.getMainWindow()
+    if (!mainWindow) return
+    mainWindow.webContents.send("openai-realtime-event", payload)
   }
 }

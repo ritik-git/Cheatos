@@ -111,6 +111,7 @@ electron_1.contextBridge.exposeInMainWorld("electronAPI", {
     moveWindowUp: () => electron_1.ipcRenderer.invoke("move-window-up"),
     moveWindowDown: () => electron_1.ipcRenderer.invoke("move-window-down"),
     analyzeAudioFromBase64: (data, mimeType) => electron_1.ipcRenderer.invoke("analyze-audio-base64", data, mimeType),
+    analyzeTranscript: (transcript) => electron_1.ipcRenderer.invoke("analyze-audio-transcript", transcript),
     analyzeAudioFile: (path) => electron_1.ipcRenderer.invoke("analyze-audio-file", path),
     analyzeImageFile: (path) => electron_1.ipcRenderer.invoke("analyze-image-file", path),
     quitApp: () => electron_1.ipcRenderer.invoke("quit-app"),
@@ -119,7 +120,32 @@ electron_1.contextBridge.exposeInMainWorld("electronAPI", {
     getAvailableOllamaModels: () => electron_1.ipcRenderer.invoke("get-available-ollama-models"),
     switchToOllama: (model, url) => electron_1.ipcRenderer.invoke("switch-to-ollama", model, url),
     switchToGemini: (apiKey) => electron_1.ipcRenderer.invoke("switch-to-gemini", apiKey),
+    switchToOpenAI: (apiKey, model) => electron_1.ipcRenderer.invoke("switch-to-openai", apiKey, model),
     testLlmConnection: () => electron_1.ipcRenderer.invoke("test-llm-connection"),
+    getContextInput: () => electron_1.ipcRenderer.invoke("get-context-input"),
+    setContextInput: (context) => electron_1.ipcRenderer.invoke("set-context-input", context),
+    startOpenAIRealtimeSession: (options) => electron_1.ipcRenderer.invoke("openai-realtime-start", options),
+    stopOpenAIRealtimeSession: (options) => electron_1.ipcRenderer.invoke("openai-realtime-stop", options),
+    sendOpenAIRealtimeChunk: (data) => electron_1.ipcRenderer.send("openai-realtime-chunk", data),
+    onOpenAIRealtimeEvent: (callback) => {
+        const listener = (_, event) => callback(event);
+        electron_1.ipcRenderer.on("openai-realtime-event", listener);
+        return () => electron_1.ipcRenderer.removeListener("openai-realtime-event", listener);
+    },
+    onToggleRealtimeHearing: (callback) => {
+        const listener = () => callback();
+        electron_1.ipcRenderer.on("toggle-realtime-hearing", listener);
+        return () => electron_1.ipcRenderer.removeListener("toggle-realtime-hearing", listener);
+    },
+    pauseRealtimeHearing: () => Promise.resolve(),
+    resumeRealtimeHearing: () => Promise.resolve(),
+    createRealtimeResponse: () => electron_1.ipcRenderer.invoke("openai-realtime-create-response"),
+    setRealtimeResponseMode: (mode) => electron_1.ipcRenderer.invoke("openai-realtime-set-mode", mode),
+    onRealtimeAnswerNow: (callback) => {
+        const listener = () => callback();
+        electron_1.ipcRenderer.on("realtime-answer-now", listener);
+        return () => electron_1.ipcRenderer.removeListener("realtime-answer-now", listener);
+    },
     invoke: (channel, ...args) => electron_1.ipcRenderer.invoke(channel, ...args)
 });
 //# sourceMappingURL=preload.js.map

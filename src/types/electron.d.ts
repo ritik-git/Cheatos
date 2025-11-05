@@ -23,8 +23,28 @@ export interface ElectronAPI {
   moveWindowUp: () => Promise<void>
   moveWindowDown: () => Promise<void>
   analyzeAudioFromBase64: (data: string, mimeType: string) => Promise<{ text: string; timestamp: number }>
+  analyzeTranscript: (transcript: string) => Promise<{ text: string; timestamp: number }>
   analyzeAudioFile: (path: string) => Promise<{ text: string; timestamp: number }>
+  analyzeImageFile: (path: string) => Promise<{ text: string; timestamp: number }>
   quitApp: () => Promise<void>
+  getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini" | "openai"; model: string; isOllama: boolean }>
+  getAvailableOllamaModels: () => Promise<string[]>
+  switchToOllama: (model?: string, url?: string) => Promise<{ success: boolean; error?: string }>
+  switchToGemini: (apiKey?: string) => Promise<{ success: boolean; error?: string }>
+  switchToOpenAI: (apiKey?: string, model?: string) => Promise<{ success: boolean; error?: string }>
+  testLlmConnection: () => Promise<{ success: boolean; error?: string }>
+  getContextInput: () => Promise<{ context: string; prompt: string }>
+  setContextInput: (context: string) => Promise<{ success: boolean; context?: string; prompt?: string; error?: string }>
+  startOpenAIRealtimeSession: (options?: { instructions?: string; model?: string }) => Promise<{ success: boolean; error?: string }>
+  stopOpenAIRealtimeSession: (options?: { close?: boolean }) => Promise<{ success: boolean; error?: string; reason?: "insufficient_audio" | "busy" | "auto" }>
+  sendOpenAIRealtimeChunk: (data: Uint8Array) => void
+  onOpenAIRealtimeEvent: (callback: (event: any) => void) => () => void
+  onToggleRealtimeHearing: (callback: () => void) => () => void
+  pauseRealtimeHearing: () => Promise<void>
+  resumeRealtimeHearing: () => Promise<void>
+  createRealtimeResponse: () => Promise<{ success: boolean; error?: string }>
+  setRealtimeResponseMode: (mode: "auto" | "manual") => Promise<{ success: boolean; error?: string }>
+  onRealtimeAnswerNow: (callback: () => void) => () => void
   invoke: (channel: string, ...args: any[]) => Promise<any>
 }
 

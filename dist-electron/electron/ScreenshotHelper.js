@@ -29,6 +29,10 @@ class ScreenshotHelper {
         if (!node_fs_1.default.existsSync(this.extraScreenshotDir)) {
             node_fs_1.default.mkdirSync(this.extraScreenshotDir);
         }
+        // Restore queues from disk (no database needed!)
+        this.restoreQueuesFromDisk().catch((error) => {
+            console.error("Error restoring screenshot queues from disk:", error);
+        });
     }
     getView() {
         return this.view;
@@ -133,6 +137,64 @@ class ScreenshotHelper {
         catch (error) {
             console.error("Error deleting file:", error);
             return { success: false, error: error.message };
+        }
+    }
+    /**
+     * Restore screenshot queues from disk without using a database.
+     * Scans directories, sorts by modification time, and loads the most recent screenshots.
+     */
+    async restoreQueuesFromDisk() {
+        try {
+            // Restore main screenshot queue
+            await this.restoreQueueFromDirectory(this.screenshotDir, this.screenshotQueue);
+            // Restore extra screenshot queue
+            await this.restoreQueueFromDirectory(this.extraScreenshotDir, this.extraScreenshotQueue);
+            console.log(`[ScreenshotHelper] Restored ${this.screenshotQueue.length} screenshots and ${this.extraScreenshotQueue.length} extra screenshots from disk`);
+        }
+        catch (error) {
+            console.error("[ScreenshotHelper] Error restoring queues from disk:", error);
+        }
+    }
+    /**
+     * Restore a single queue from a directory by scanning files and sorting by modification time.
+     */
+    async restoreQueueFromDirectory(directory, queue) {
+        try {
+            if (!node_fs_1.default.existsSync(directory)) {
+                return;
+            }
+            // Read all files in the directory
+            const files = await node_fs_1.default.promises.readdir(directory);
+            // Filter for PNG files and get their stats
+            const fileStats = await Promise.all(files
+                .filter((file) => file.endsWith(".png"))
+                .map(async (file) => {
+                const filePath = node_path_1.default.join(directory, file);
+                try {
+                    const stats = await node_fs_1.default.promises.stat(filePath);
+                    return {
+                        path: filePath,
+                        mtime: stats.mtime.getTime(), // Modification time as timestamp
+                    };
+                }
+                catch (error) {
+                    console.warn(`[ScreenshotHelper] Error reading file ${filePath}:`, error);
+                    return null;
+                }
+            }));
+            // Filter out nulls and sort by modification time (most recent first)
+            const validFiles = fileStats
+                .filter((file) => file !== null)
+                .sort((a, b) => b.mtime - a.mtime) // Most recent first
+                .slice(0, this.MAX_SCREENSHOTS) // Keep only the most recent MAX_SCREENSHOTS
+                .map((file) => file.path); // Extract just the paths
+            // Clear and populate the queue
+            queue.length = 0;
+            queue.push(...validFiles);
+            console.log(`[ScreenshotHelper] Restored ${queue.length} screenshots from ${directory}`);
+        }
+        catch (error) {
+            console.error(`[ScreenshotHelper] Error restoring queue from ${directory}:`, error);
         }
     }
 }

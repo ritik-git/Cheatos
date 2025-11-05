@@ -72,6 +72,16 @@ function initializeIpcHandlers(appState) {
             throw error;
         }
     });
+    electron_1.ipcMain.handle("analyze-audio-transcript", async (_event, transcript) => {
+        try {
+            const result = await appState.processingHelper.processTranscript(transcript);
+            return result;
+        }
+        catch (error) {
+            console.error("Error in analyze-audio-transcript handler:", error);
+            throw error;
+        }
+    });
     // IPC handler for analyzing audio from file path
     electron_1.ipcMain.handle("analyze-audio-file", async (event, path) => {
         try {
@@ -138,6 +148,28 @@ function initializeIpcHandlers(appState) {
             throw error;
         }
     });
+    electron_1.ipcMain.handle("get-context-input", async () => {
+        try {
+            return {
+                context: appState.processingHelper.getContextInput() ?? "",
+                prompt: appState.processingHelper.getLLMHelper().getSystemPrompt()
+            };
+        }
+        catch (error) {
+            console.error("Error getting context input:", error);
+            return { context: "", prompt: appState.processingHelper.getLLMHelper().getSystemPrompt() };
+        }
+    });
+    electron_1.ipcMain.handle("set-context-input", async (_event, context) => {
+        try {
+            const result = appState.processingHelper.setContextInput(context);
+            return { success: true, ...result };
+        }
+        catch (error) {
+            console.error("Error setting context input:", error);
+            return { success: false, error: error?.message ?? String(error) };
+        }
+    });
     electron_1.ipcMain.handle("get-available-ollama-models", async () => {
         try {
             const llmHelper = appState.processingHelper.getLLMHelper();
@@ -171,6 +203,17 @@ function initializeIpcHandlers(appState) {
             return { success: false, error: error.message };
         }
     });
+    electron_1.ipcMain.handle("switch-to-openai", async (_, apiKey, model) => {
+        try {
+            const llmHelper = appState.processingHelper.getLLMHelper();
+            await llmHelper.switchToOpenAI(apiKey, model);
+            return { success: true };
+        }
+        catch (error) {
+            console.error("Error switching to OpenAI:", error);
+            return { success: false, error: error.message };
+        }
+    });
     electron_1.ipcMain.handle("test-llm-connection", async () => {
         try {
             const llmHelper = appState.processingHelper.getLLMHelper();
@@ -180,6 +223,56 @@ function initializeIpcHandlers(appState) {
         catch (error) {
             console.error("Error testing LLM connection:", error);
             return { success: false, error: error.message };
+        }
+    });
+    electron_1.ipcMain.handle("openai-realtime-start", async (_event, options) => {
+        try {
+            return await appState.processingHelper.startOpenAIRealtimeSession(options);
+        }
+        catch (error) {
+            console.error("Error starting OpenAI realtime session:", error);
+            return { success: false, error: error?.message ?? String(error) };
+        }
+    });
+    electron_1.ipcMain.handle("openai-realtime-stop", async (_event, options) => {
+        try {
+            return await appState.processingHelper.stopOpenAIRealtimeSession(options);
+        }
+        catch (error) {
+            console.error("Error stopping OpenAI realtime session:", error);
+            return { success: false, error: error?.message ?? String(error) };
+        }
+    });
+    electron_1.ipcMain.on("openai-realtime-chunk", (_event, payload) => {
+        try {
+            appState.processingHelper.appendRealtimeAudioChunk(Buffer.isBuffer(payload) ? payload : Buffer.from(payload));
+        }
+        catch (error) {
+            console.error("Error sending realtime audio chunk:", error);
+            const window = appState.getMainWindow();
+            window?.webContents.send("openai-realtime-event", {
+                kind: "error",
+                message: error instanceof Error ? error.message : String(error)
+            });
+        }
+    });
+    electron_1.ipcMain.handle("openai-realtime-create-response", async () => {
+        try {
+            return await appState.processingHelper.createRealtimeResponseManually();
+        }
+        catch (error) {
+            console.error("Error creating realtime response:", error);
+            return { success: false, error: error?.message ?? String(error) };
+        }
+    });
+    electron_1.ipcMain.handle("openai-realtime-set-mode", async (_event, mode) => {
+        try {
+            appState.processingHelper.setRealtimeResponseMode(mode);
+            return { success: true };
+        }
+        catch (error) {
+            console.error("Error setting realtime response mode:", error);
+            return { success: false, error: error?.message ?? String(error) };
         }
     });
 }

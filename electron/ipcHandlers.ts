@@ -81,6 +81,16 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   })
 
+  ipcMain.handle("analyze-audio-transcript", async (_event, transcript: string) => {
+    try {
+      const result = await appState.processingHelper.processTranscript(transcript)
+      return result
+    } catch (error: any) {
+      console.error("Error in analyze-audio-transcript handler:", error)
+      throw error
+    }
+  })
+
   // IPC handler for analyzing audio from file path
   ipcMain.handle("analyze-audio-file", async (event, path: string) => {
     try {
@@ -153,6 +163,28 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  ipcMain.handle("get-context-input", async () => {
+    try {
+      return {
+        context: appState.processingHelper.getContextInput() ?? "",
+        prompt: appState.processingHelper.getLLMHelper().getSystemPrompt()
+      }
+    } catch (error: any) {
+      console.error("Error getting context input:", error)
+      return { context: "", prompt: appState.processingHelper.getLLMHelper().getSystemPrompt() }
+    }
+  })
+
+  ipcMain.handle("set-context-input", async (_event, context?: string) => {
+    try {
+      const result = appState.processingHelper.setContextInput(context)
+      return { success: true, ...result }
+    } catch (error: any) {
+      console.error("Error setting context input:", error)
+      return { success: false, error: error?.message ?? String(error) }
+    }
+  })
+
   ipcMain.handle("get-available-ollama-models", async () => {
     try {
       const llmHelper = appState.processingHelper.getLLMHelper();
@@ -186,6 +218,17 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  ipcMain.handle("switch-to-openai", async (_, apiKey?: string, model?: string) => {
+    try {
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      await llmHelper.switchToOpenAI(apiKey, model);
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error switching to OpenAI:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle("test-llm-connection", async () => {
     try {
       const llmHelper = appState.processingHelper.getLLMHelper();
@@ -196,4 +239,54 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: false, error: error.message };
     }
   });
+
+  ipcMain.handle("openai-realtime-start", async (_event, options?: { instructions?: string; model?: string }) => {
+    try {
+      return await appState.processingHelper.startOpenAIRealtimeSession(options)
+    } catch (error: any) {
+      console.error("Error starting OpenAI realtime session:", error)
+      return { success: false, error: error?.message ?? String(error) }
+    }
+  })
+
+  ipcMain.handle("openai-realtime-stop", async (_event, options?: { close?: boolean }) => {
+    try {
+      return await appState.processingHelper.stopOpenAIRealtimeSession(options)
+    } catch (error: any) {
+      console.error("Error stopping OpenAI realtime session:", error)
+      return { success: false, error: error?.message ?? String(error) }
+    }
+  })
+
+  ipcMain.on("openai-realtime-chunk", (_event, payload: Buffer | Uint8Array) => {
+    try {
+      appState.processingHelper.appendRealtimeAudioChunk(Buffer.isBuffer(payload) ? payload : Buffer.from(payload))
+    } catch (error) {
+      console.error("Error sending realtime audio chunk:", error)
+      const window = appState.getMainWindow()
+      window?.webContents.send("openai-realtime-event", {
+        kind: "error",
+        message: error instanceof Error ? error.message : String(error)
+      })
+    }
+  })
+
+  ipcMain.handle("openai-realtime-create-response", async () => {
+    try {
+      return await appState.processingHelper.createRealtimeResponseManually()
+    } catch (error: any) {
+      console.error("Error creating realtime response:", error)
+      return { success: false, error: error?.message ?? String(error) }
+    }
+  })
+
+  ipcMain.handle("openai-realtime-set-mode", async (_event, mode: "auto" | "manual") => {
+    try {
+      appState.processingHelper.setRealtimeResponseMode(mode)
+      return { success: true }
+    } catch (error: any) {
+      console.error("Error setting realtime response mode:", error)
+      return { success: false, error: error?.message ?? String(error) }
+    }
+  })
 }

@@ -384,7 +384,7 @@ const Debug: React.FC<DebugProps> = ({ isProcessing, setIsProcessing }) => {
                     <div className="space-y-1">
                       {thoughtsData.map((thought, index) => (
                         <div key={index} className="flex items-start gap-2">
-                          <div className="w-1 h-1 rounded-full bg-blue-400/80 mt-2 shrink-0" />
+                      <div className="w-1 h-1 rounded-full bg-white/60 mt-2 shrink-0" />
                           <div>{thought}</div>
                         </div>
                       ))}

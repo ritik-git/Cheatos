@@ -8,10 +8,12 @@ If you’re looking for a hosted desktop recording API, consider checking out [R
 ## 🚀 Quick Start Guide
 
 ### Prerequisites
-- Make sure you have Node.js installed on your computer
-- Git installed on your computer  
-- **Either** a Gemini API key (get it from [Google AI Studio](https://makersuite.google.com/app/apikey))
-- **Or** Ollama installed locally for private LLM usage (recommended for privacy)
+- Node.js installed
+- Git installed  
+- At least one AI provider configured:
+  - **Recommended (default):** OpenAI ChatGPT key (`OPENAI_API_KEY`) for fastest responses
+  - Google Gemini API key (`GEMINI_API_KEY`) as a backup cloud option
+  - Ollama installed locally (`USE_OLLAMA=true`) for fully private processing
 
 ### Installation Steps
 
@@ -34,9 +36,18 @@ npm install
 3. Set up environment variables:
    - Create a file named `.env` in the root folder
    
-   **For Gemini (Cloud AI):**
+   **For ChatGPT (Default Cloud AI):**
    ```env
-   GEMINI_API_KEY=your_api_key_here
+   OPENAI_API_KEY=your_openai_key
+   # Optional: override the default Responses model (defaults to gpt-4o-mini)
+   OPENAI_MODEL=gpt-4o-mini
+   # Optional: override the realtime streaming model (defaults to gpt-4o-mini-realtime-preview)
+   OPENAI_REALTIME_MODEL=gpt-4o-mini-realtime-preview
+   ```
+   
+   **For Gemini (Fallback Cloud AI):**
+   ```env
+   GEMINI_API_KEY=your_gemini_key
    ```
    
    **For Ollama (Local/Private AI):**
@@ -69,6 +80,28 @@ The built app will be in the `release` folder.
 
 ## 🤖 AI Provider Options
 
+### ChatGPT (OpenAI – Default)
+**Pros:**
+- Default `gpt-4o-mini` (Responses API) handles screenshots, text, and coding tasks
+- Built-in realtime streaming uses `gpt-4o-mini-realtime-preview` for live transcription + insights
+- Alternative lighter models (`gpt-4.1-mini`, `gpt-4.1-nano`) for lower cost
+- Automatically enabled when `OPENAI_API_KEY` is present
+
+**Cons:**
+- Requires OpenAI account and paid usage
+- Internet connection needed
+
+**Setup:**
+1. Create an OpenAI API key from the [OpenAI dashboard](https://platform.openai.com/)
+2. Add `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`) to `.env`
+3. Select **ChatGPT (OpenAI)** in the in-app model selector if you ever switch away
+
+### Live Meeting Assistant (OpenAI Realtime)
+- Click **🎤 Record Voice** to stream microphone audio into the OpenAI Realtime API
+- Uses `gpt-4o-mini-realtime-preview` by default for low-latency transcription and smart insights
+- Override the streaming model with `OPENAI_REALTIME_MODEL` if you need a different voice or latency profile
+- Requires an active OpenAI key; falls back to Gemini/Ollama when OpenAI is unavailable
+
 ### Ollama (Recommended for Privacy)
 **Pros:**
 - 100% private - data never leaves your computer
@@ -81,11 +114,10 @@ The built app will be in the `release` folder.
 2. Pull a model: `ollama pull llama3.2`
 3. Set environment variables as shown above
 
-### Google Gemini
+### Google Gemini (Fallback Cloud Option)
 **Pros:**
-- Latest AI technology
-- Fastest responses
-- Best accuracy for complex tasks
+- Strong reasoning for structured outputs
+- Uses Google's ecosystem if you already have billing set up
 
 **Cons:**
 - Requires API key and internet
@@ -180,7 +212,8 @@ If you see other errors:
 
 ### **Privacy-First Design**
 - **Local AI Option**: Use Ollama for 100% private processing
-- **Cloud Option**: Google Gemini for maximum performance
+- **Cloud Option**: ChatGPT (OpenAI) for fastest responses
+- **Backup Cloud**: Google Gemini if you prefer Google stack
 - Screenshots auto-deleted after processing
 - No data tracking or storage
 

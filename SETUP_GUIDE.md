@@ -12,21 +12,30 @@ This guide will help you get Free Cluely up and running on your system.
 
 ## Next Steps
 
-### 1. Get a Gemini API Key
+### 1. Get an OpenAI API Key (Default)
 
-To use the application with Google Gemini AI, you need to:
+For the fastest experience, generate a ChatGPT (OpenAI) key:
 
-1. Visit [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. Sign in with your Google account
-3. Click "Create API Key"
-4. Copy your API key
+1. Visit the [OpenAI dashboard](https://platform.openai.com/api-keys)
+2. Sign in and create a new secret key
+3. Copy the key value
 
-### 2. Configure the API Key
+### 2. Configure Your API Keys
 
-Open the `.env` file and replace `your_api_key_here` with your actual API key:
+Open the `.env` file and add your keys. At minimum include your OpenAI key:
 
 ```env
-GEMINI_API_KEY=AIzaSy...your_actual_key_here...
+OPENAI_API_KEY=sk-...
+# Optional: override the default Responses model (defaults to gpt-4o-mini)
+# OPENAI_MODEL=gpt-4o-mini  # or gpt-4.1-mini / gpt-4.1-nano
+# Optional: override the realtime streaming model (defaults to gpt-4o-mini-realtime-preview)
+# OPENAI_REALTIME_MODEL=gpt-4o-mini-realtime-preview
+```
+
+**Optional – Google Gemini fallback:**
+
+```env
+GEMINI_API_KEY=AIzaSy...your_gemini_key...
 ```
 
 ### 3. Run the Application
@@ -129,6 +138,7 @@ free-cluely/
 ## Additional Resources
 
 - [Official Repository](https://github.com/Prat011/free-cluely)
+- [OpenAI API Dashboard](https://platform.openai.com/)
 - [Google Gemini API](https://makersuite.google.com/app/apikey)
 - [Ollama Documentation](https://ollama.ai/docs)
 - [Electron Documentation](https://www.electronjs.org/)

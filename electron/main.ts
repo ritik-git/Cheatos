@@ -271,6 +271,18 @@ export class AppState {
 async function initializeApp() {
   const appState = AppState.getInstance()
 
+  // Suppress harmless Electron/Chromium network errors
+  const originalConsoleError = console.error
+  console.error = (...args: any[]) => {
+    const errorMessage = args.join(' ')
+    // Filter out the harmless chunked data pipe upload error
+    if (errorMessage.includes('chunked_data_pipe_upload_data_stream') || 
+        errorMessage.includes('OnSizeReceived failed with Error: -2')) {
+      return // Suppress this error
+    }
+    originalConsoleError.apply(console, args)
+  }
+
   // Initialize IPC handlers before window creation
   initializeIpcHandlers(appState)
 
