@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react"
+import React, { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from "react"
 import { IoLogOutOutline } from "react-icons/io5"
 import { RealtimeAudioStreamer, createElectronRealtimeAudioStreamer } from "../../lib/realtimeAudio"
 
@@ -15,7 +15,12 @@ interface QueueCommandsProps {
   onRealtimeStatusChange?: (status: string | null) => void
 }
 
-const QueueCommands: React.FC<QueueCommandsProps> = ({
+export interface QueueCommandsRef {
+  restartAudioStreamer: () => Promise<void>
+  isAudioStreaming: () => boolean
+}
+
+const QueueCommands = forwardRef<QueueCommandsRef, QueueCommandsProps>(({
   onTooltipVisibilityChange,
   screenshots,
   onChatToggle,
@@ -26,10 +31,11 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
   realtimeHearingPaused = false,
   onRealtimeHearingToggle,
   onRealtimeStatusChange
-}) => {
+}, ref) => {
   const [isTooltipVisible, setIsTooltipVisible] = useState(false)
   const tooltipRef = useRef<HTMLDivElement>(null)
   const realtimeAudioStreamerRef = useRef<RealtimeAudioStreamer | null>(null)
+  const manualDisconnectRef = useRef(false) // Track if disconnect was manual
 
   const updateRealtimeStatus = useCallback(
     (status: string | null) => {
@@ -38,6 +44,30 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
     },
     [onRealtimeStatusChange]
   )
+
+  // Expose restart method via ref
+  useImperativeHandle(ref, () => ({
+    restartAudioStreamer: async () => {
+      console.log("[QueueCommands] Restarting audio streamer")
+      try {
+        // If streamer exists but is stopped, create a new one
+        if (!realtimeAudioStreamerRef.current || !realtimeAudioStreamerRef.current.isStreaming()) {
+          const streamer = createElectronRealtimeAudioStreamer()
+          realtimeAudioStreamerRef.current = streamer
+          await streamer.start()
+          console.log("[QueueCommands] Audio streamer restarted successfully")
+        } else {
+          console.log("[QueueCommands] Audio streamer already running")
+        }
+      } catch (error: any) {
+        console.error("[QueueCommands] Failed to restart audio streamer:", error)
+        throw error
+      }
+    },
+    isAudioStreaming: () => {
+      return realtimeAudioStreamerRef.current?.isStreaming() ?? false
+    }
+  }), [])
 
 
   useEffect(() => {
@@ -58,7 +88,8 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
 
   const handleRealtimeToggle = async () => {
     if (realtimeConnected) {
-      // Disconnect
+      // Manual disconnect - mark it and stop audio
+      manualDisconnectRef.current = true
       try {
         // Stop audio streamer
         if (realtimeAudioStreamerRef.current) {
@@ -74,6 +105,7 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
       }
     } else {
       // Connect
+      manualDisconnectRef.current = false
       try {
         updateRealtimeStatus("Connecting...")
         // Start realtime session
@@ -123,14 +155,20 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
     }
   }, [])
 
-      // Cleanup realtime streamer when disconnected
+      // Cleanup realtime streamer when disconnected (only on manual disconnect)
   useEffect(() => {
-    if (!realtimeConnected && realtimeAudioStreamerRef.current) {
+    // Only stop audio streamer on manual disconnect, not on automatic session refresh
+    if (!realtimeConnected && realtimeAudioStreamerRef.current && manualDisconnectRef.current) {
+      console.log("[QueueCommands] Manual disconnect detected, stopping audio streamer")
       realtimeAudioStreamerRef.current.stop().catch((error) => {
         console.warn("[UI] Failed to stop realtime audio streamer on disconnect:", error)
       })
       realtimeAudioStreamerRef.current = null
       ;(window as any).__realtimeAudioStreamer = null
+      manualDisconnectRef.current = false
+    } else if (!realtimeConnected && !manualDisconnectRef.current) {
+      // Automatic disconnect (session refresh) - don't stop audio, just mark it
+      console.log("[QueueCommands] Automatic disconnect (session refresh), preserving audio streamer state")
     }
   }, [realtimeConnected])
 
@@ -351,6 +389,8 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
       {/* Remove the Dialog component */}
     </div>
   )
-}
+})
+
+QueueCommands.displayName = "QueueCommands"
 
 export default QueueCommands

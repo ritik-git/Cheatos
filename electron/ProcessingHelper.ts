@@ -4,6 +4,7 @@ import { AppState } from "./main"
 import { LLMHelper } from "./LLMHelper"
 import { OpenAIRealtimeClient, RealtimeConnectionEvent, RealtimeErrorEvent, RealtimeInsightEvent, RealtimeTranscriptEvent } from "./OpenAIRealtimeClient"
 import { PROMPTS } from "../shared/prompt"
+import * as path from "path"
 
 // Safely load dotenv if available (may not be included in production builds)
 // Use a function wrapper to ensure the try-catch properly handles module loading errorsrrr
@@ -36,6 +37,18 @@ export class ProcessingHelper {
   private currentProcessingAbortController: AbortController | null = null
   private currentExtraProcessingAbortController: AbortController | null = null
   private realtimeSessionState: "idle" | "connecting" | "connected" | "disconnected" = "idle"
+  
+  // Session health tracking
+  private questionCount = 0
+  private responseTimes: number[] = []
+  private sessionStartTime: number | null = null
+  private readonly MAX_QUESTIONS_BEFORE_REFRESH = 5
+  private readonly MAX_RESPONSE_TIME_MS = 5000 // 5 seconds
+  private readonly MAX_RESPONSE_TIMES_TO_TRACK = 10
+  
+  // Prompt caching to avoid repeated string concatenation
+  private promptCache: Map<string, string> = new Map()
+  private lastContextInput: string | undefined = undefined
 
   constructor(appState: AppState) {
     this.appState = appState
@@ -58,8 +71,13 @@ export class ProcessingHelper {
     this.openaiApiKey = openaiApiKey
 
     if (!openaiApiKey && !geminiApiKey && !useOllama) {
+      const envPath = path.join(process.cwd(), ".env")
       throw new Error(
-        "No LLM provider configured. Set OPENAI_API_KEY, GEMINI_API_KEY, or enable Ollama with USE_OLLAMA=true"
+        `No LLM provider configured. Please create a .env file in the project root (${envPath}) with at least one of the following:\n\n` +
+        `Option 1 (OpenAI - Recommended):\n  OPENAI_API_KEY=your_openai_key_here\n\n` +
+        `Option 2 (Google Gemini):\n  GEMINI_API_KEY=your_gemini_key_here\n\n` +
+        `Option 3 (Ollama - Local/Private):\n  USE_OLLAMA=true\n  OLLAMA_MODEL=llama3.2\n\n` +
+        `See README.md for detailed setup instructions.`
       )
     }
 
@@ -226,7 +244,23 @@ export class ProcessingHelper {
       try {
         // Update instructions with audio-specific prompt when context changes
         const contextInput = this.llmHelper.getContextInput()
-        let audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+        
+        // Use cached prompt if context hasn't changed
+        let audioInstructions: string
+        const contextKey = contextInput || ""
+        if (this.lastContextInput === contextKey && this.promptCache.has(contextKey)) {
+          audioInstructions = this.promptCache.get(contextKey)!
+          console.log("[ProcessingHelper] Using cached prompt")
+        } else {
+          audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+          this.promptCache.set(contextKey, audioInstructions)
+          this.lastContextInput = contextKey
+          // Limit cache size to prevent memory growth
+          if (this.promptCache.size > 5) {
+            const firstKey = this.promptCache.keys().next().value
+            this.promptCache.delete(firstKey)
+          }
+        }
         
         // Validate prompt length before updating
         const MAX_INSTRUCTIONS_LENGTH = 30000
@@ -302,7 +336,23 @@ export class ProcessingHelper {
     } else {
       // Use audio-specific prompt for optimal audio response behavior
       const contextInput = this.llmHelper.getContextInput()
-      let audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+      
+      // Use cached prompt if available
+      const contextKey = contextInput || ""
+      let audioInstructions: string
+      if (this.promptCache.has(contextKey)) {
+        audioInstructions = this.promptCache.get(contextKey)!
+        console.log("[ProcessingHelper] Using cached prompt for session start")
+      } else {
+        audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+        this.promptCache.set(contextKey, audioInstructions)
+        this.lastContextInput = contextKey
+        // Limit cache size
+        if (this.promptCache.size > 5) {
+          const firstKey = this.promptCache.keys().next().value
+          this.promptCache.delete(firstKey)
+        }
+      }
       
       // Validate prompt length
       const MAX_INSTRUCTIONS_LENGTH = 30000
@@ -430,7 +480,22 @@ export class ProcessingHelper {
     const realtimeModel = process.env.OPENAI_REALTIME_MODEL || this.llmHelper.getOpenAIRealtimeModel()
     const contextInput = this.llmHelper.getContextInput()
     // Use audio-specific prompt as instructions for optimal audio response behavior
-    let audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+    // Use cached prompt if available
+    const contextKey = contextInput || ""
+    let audioInstructions: string
+    if (this.promptCache.has(contextKey)) {
+      audioInstructions = this.promptCache.get(contextKey)!
+      console.log("[ProcessingHelper] Using cached prompt for client initialization")
+    } else {
+      audioInstructions = PROMPTS.analyzeAudioQuick(contextInput)
+      this.promptCache.set(contextKey, audioInstructions)
+      this.lastContextInput = contextKey
+      // Limit cache size
+      if (this.promptCache.size > 5) {
+        const firstKey = this.promptCache.keys().next().value
+        this.promptCache.delete(firstKey)
+      }
+    }
     
     // Validate prompt length (OpenAI Realtime API has limits, estimate ~32k chars max)
     // If prompt is too long, truncate while keeping essential parts
@@ -470,16 +535,28 @@ export class ProcessingHelper {
     client.on("connected", () => {
       console.log("[ProcessingHelper] OpenAI realtime connected")
       this.realtimeSessionState = "connected"
+      // Reset session health tracking
+      this.questionCount = 0
+      this.responseTimes = []
+      this.sessionStartTime = Date.now()
       this.forwardRealtimeEvent({ kind: "connected" })
     })
 
     client.on("disconnected", (event: RealtimeConnectionEvent) => {
       console.warn("[ProcessingHelper] OpenAI realtime disconnected", event)
       this.realtimeSessionState = "disconnected"
+      // Reset session health tracking
+      this.questionCount = 0
+      this.responseTimes = []
+      this.sessionStartTime = null
       this.forwardRealtimeEvent({ kind: "disconnected", ...event })
     })
 
     client.on("transcript", (event: RealtimeTranscriptEvent) => {
+      // Track when a new question starts (final transcript)
+      if (event.isFinal && this.sessionStartTime) {
+        this.sessionStartTime = Date.now() // Reset timer for response time tracking
+      }
       this.forwardRealtimeEvent({ kind: "transcript", ...event })
     })
 
@@ -490,6 +567,35 @@ export class ProcessingHelper {
         isFinal: event.isFinal,
         preview: event.text?.slice(0, 100)
       })
+      
+      // Track response time if this is a final response
+      if (event.isFinal && this.sessionStartTime) {
+        const responseTime = Date.now() - this.sessionStartTime
+        this.responseTimes.push(responseTime)
+        if (this.responseTimes.length > this.MAX_RESPONSE_TIMES_TO_TRACK) {
+          this.responseTimes.shift()
+        }
+        
+        // Increment question count
+        this.questionCount++
+        
+        // DISABLED: Automatic session refresh removed - keep connection open
+        // this.checkAndRefreshSessionIfNeeded()
+        
+        // Log health metrics periodically for monitoring
+        if (this.questionCount > 0 && this.questionCount % 3 === 0) {
+          const bufferStats = this.openaiRealtimeClient?.getBufferStats()
+          const avgResponseTime = this.responseTimes.length > 0
+            ? this.responseTimes.reduce((a, b) => a + b, 0) / this.responseTimes.length
+            : 0
+          console.log("[ProcessingHelper] Session health metrics", {
+            questionCount: this.questionCount,
+            avgResponseTime: Math.round(avgResponseTime),
+            bufferStats
+          })
+        }
+      }
+      
       this.forwardRealtimeEvent({ kind: "insight", ...event })
     })
 
@@ -526,5 +632,62 @@ export class ProcessingHelper {
     const mainWindow = this.appState.getMainWindow()
     if (!mainWindow) return
     mainWindow.webContents.send("openai-realtime-event", payload)
+  }
+
+  // DISABLED: Automatic session refresh removed - connection stays open indefinitely
+  // private async checkAndRefreshSessionIfNeeded(): Promise<void> {
+  //   // This method is disabled to keep connection open without automatic refreshes
+  // }
+
+  private async refreshRealtimeSession(): Promise<void> {
+    if (this.realtimeSessionState !== "connected") {
+      return
+    }
+
+    console.log("[ProcessingHelper] Refreshing realtime session to reset context")
+    
+    try {
+      // Save current instructions before disconnecting
+      const currentInstructions = this.openaiRealtimeClient?.getInstructions()
+
+      // Close current session
+      await this.stopOpenAIRealtimeSession({ close: true })
+
+      // Wait a brief moment before reconnecting
+      await new Promise(resolve => setTimeout(resolve, 500))
+
+      // Reconnect with same instructions
+      const result = await this.startOpenAIRealtimeSession({
+        instructions: currentInstructions
+      })
+
+      if (result.success) {
+        console.log("[ProcessingHelper] Session refreshed successfully")
+        // Reset counters after refresh
+        this.questionCount = 0
+        this.responseTimes = []
+        this.sessionStartTime = Date.now()
+      } else {
+        console.error("[ProcessingHelper] Failed to refresh session:", result.error)
+      }
+    } catch (error) {
+      console.error("[ProcessingHelper] Error refreshing session:", error)
+    }
+  }
+
+  public getSessionHealth(): {
+    questionCount: number
+    avgResponseTime: number
+    bufferStats?: { transcriptCount: number; responseCount: number; totalMemory: number }
+  } {
+    const avgResponseTime = this.responseTimes.length > 0
+      ? this.responseTimes.reduce((a, b) => a + b, 0) / this.responseTimes.length
+      : 0
+
+    return {
+      questionCount: this.questionCount,
+      avgResponseTime: Math.round(avgResponseTime),
+      bufferStats: this.openaiRealtimeClient?.getBufferStats()
+    }
   }
 }

@@ -8,7 +8,7 @@ import {
   ToastVariant,
   ToastMessage
 } from "../components/ui/toast"
-import QueueCommands from "../components/Queue/QueueCommands"
+import QueueCommands, { QueueCommandsRef } from "../components/Queue/QueueCommands"
 import ModelSelector from "../components/ui/ModelSelector"
 
 interface QueueProps {
@@ -51,6 +51,8 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
   const fallbackInFlightRef = useRef(false)
   const realtimeCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const realtimeCloseRequestedRef = useRef(false)
+  const audioWasActiveRef = useRef(false) // Track if audio was active before disconnect
+  const queueCommandsRef = useRef<QueueCommandsRef>(null) // Ref to QueueCommands component
 
   const triggerTranscriptFallback = useCallback(async () => {
     if (fallbackInFlightRef.current) return
@@ -304,10 +306,33 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
             realtimeCloseTimeoutRef.current = null
           }
           realtimeCloseRequestedRef.current = false
+          
+          // CRITICAL FIX: Restart audio streamer if it was active before disconnect
+          if (audioWasActiveRef.current && queueCommandsRef.current) {
+            console.log("[Queue] Restarting audio streamer after session reconnect")
+            queueCommandsRef.current.restartAudioStreamer()
+              .then(() => {
+                // Mark audio as active after successful restart
+                audioWasActiveRef.current = true
+                console.log("[Queue] Audio streamer restarted successfully after session refresh")
+              })
+              .catch((error) => {
+                console.error("[Queue] Failed to restart audio streamer after reconnect:", error)
+                setRealtimeStatus("Connected but audio restart failed - please reconnect manually")
+                audioWasActiveRef.current = false
+              })
+          } else if (!audioWasActiveRef.current) {
+            // First time connection - check if audio starts (will be set when audio actually starts)
+            // This will be handled by the useEffect that monitors realtimeConnected
+          }
           break
         }
 
         case "disconnected": {
+          // Track if audio was active before disconnect (for session refresh recovery)
+          audioWasActiveRef.current = realtimeConnected && (queueCommandsRef.current?.isAudioStreaming() ?? false)
+          console.log("[Queue] Disconnected, audio was active:", audioWasActiveRef.current)
+          
           setRealtimeInsightDraft(null)
           setChatLoading(false)
           setRealtimeConnected(false)
@@ -374,6 +399,22 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
       }
     }
   }, [scheduleRealtimeClose, triggerTranscriptFallback, isChatOpen, realtimeAnswerMode])
+
+  // Track when audio is actively streaming (for session refresh recovery)
+  useEffect(() => {
+    if (realtimeConnected && queueCommandsRef.current) {
+      // Check if audio is streaming after a short delay to allow it to start
+      const checkAudio = setTimeout(() => {
+        const isStreaming = queueCommandsRef.current?.isAudioStreaming() ?? false
+        if (isStreaming) {
+          audioWasActiveRef.current = true
+          console.log("[Queue] Audio is streaming, marking as active")
+        }
+      }, 500) // Small delay to allow audio to start
+      
+      return () => clearTimeout(checkAudio)
+    }
+  }, [realtimeConnected])
 
   // Keyboard shortcut for toggling hearing (⌘K)
   useEffect(() => {
@@ -549,6 +590,7 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
           </Toast>
           <div className="w-fit">
             <QueueCommands
+              ref={queueCommandsRef}
               screenshots={screenshots}
               onTooltipVisibilityChange={handleTooltipVisibilityChange}
               onChatToggle={handleChatToggle}

@@ -75,8 +75,11 @@ export class OpenAIRealtimeClient extends EventEmitter {
   private fallbackResponsePending = false // Prevent duplicate fallback response creation
   private responseMode: "auto" | "manual" = "manual" // Track response mode
 
-  private transcriptBuffers = new Map<string, string>()
-  private responseBuffers = new Map<string, string>()
+  private transcriptBuffers = new Map<string, { text: string; timestamp: number }>()
+  private responseBuffers = new Map<string, { text: string; timestamp: number }>()
+  private bufferCleanupInterval: NodeJS.Timeout | null = null
+  private readonly MAX_BUFFER_ITEMS = 10 // Keep only last 10 items
+  private readonly MAX_BUFFER_AGE_MS = 10 * 60 * 1000 // 10 minutes
 
   constructor(options: OpenAIRealtimeClientOptions) {
     super()
@@ -94,6 +97,9 @@ export class OpenAIRealtimeClient extends EventEmitter {
     }
     this.autoRespond = this.turnDetection.createResponse !== false
     this.transcriptionConfig = options.transcription
+    
+    // Start periodic buffer cleanup
+    this.startBufferCleanup()
   }
 
   public setInstructions(instructions: string | undefined): void {
@@ -130,6 +136,10 @@ export class OpenAIRealtimeClient extends EventEmitter {
 
   public getResponseMode(): "auto" | "manual" {
     return this.responseMode
+  }
+
+  public getInstructions(): string {
+    return this.instructions
   }
 
   public createResponseManually(): { success: boolean; error?: string } {
@@ -407,9 +417,9 @@ export class OpenAIRealtimeClient extends EventEmitter {
         const itemId: string | undefined = payload.item_id
         const delta: string | undefined = payload.delta
         if (!itemId || !delta) break
-        const current = this.transcriptBuffers.get(itemId) ?? ""
+        const current = this.transcriptBuffers.get(itemId)?.text ?? ""
         const updated = current + delta
-        this.transcriptBuffers.set(itemId, updated)
+        this.transcriptBuffers.set(itemId, { text: updated, timestamp: Date.now() })
         console.debug("[OpenAIRealtimeClient] Transcript delta", {
           itemId,
           deltaPreview: delta.slice(0, 50)
@@ -426,7 +436,7 @@ export class OpenAIRealtimeClient extends EventEmitter {
         const itemId: string | undefined = payload.item_id
         const transcript: string | undefined = payload.transcript
         if (!itemId || typeof transcript !== "string") break
-        this.transcriptBuffers.set(itemId, transcript)
+        this.transcriptBuffers.set(itemId, { text: transcript, timestamp: Date.now() })
         console.log("[OpenAIRealtimeClient] Transcript completed", {
           itemId,
           transcript
@@ -486,9 +496,9 @@ export class OpenAIRealtimeClient extends EventEmitter {
           break
         }
         this.responseInProgress = true
-        const current = this.responseBuffers.get(responseId) ?? ""
+        const current = this.responseBuffers.get(responseId)?.text ?? ""
         const updated = current + delta
-        this.responseBuffers.set(responseId, updated)
+        this.responseBuffers.set(responseId, { text: updated, timestamp: Date.now() })
         console.log("[OpenAIRealtimeClient] Response delta received", {
           responseId,
           deltaLength: delta.length,
@@ -521,8 +531,8 @@ export class OpenAIRealtimeClient extends EventEmitter {
           })
           break
         }
-        const finalText = typeof text === "string" ? text : this.responseBuffers.get(responseId) ?? ""
-        this.responseBuffers.set(responseId, finalText)
+        const finalText = typeof text === "string" ? text : this.responseBuffers.get(responseId)?.text ?? ""
+        this.responseBuffers.set(responseId, { text: finalText, timestamp: Date.now() })
         console.log("[OpenAIRealtimeClient] Response done", {
           responseId,
           finalTextLength: finalText.length,
@@ -542,7 +552,7 @@ export class OpenAIRealtimeClient extends EventEmitter {
         console.log("[OpenAIRealtimeClient] Response created", { responseId })
         if (responseId) {
           // Initialize buffer for this response
-          this.responseBuffers.set(responseId, "")
+          this.responseBuffers.set(responseId, { text: "", timestamp: Date.now() })
         }
         this.responseInProgress = true
         this.fallbackResponsePending = false // Clear fallback flag since response was created
@@ -583,7 +593,7 @@ export class OpenAIRealtimeClient extends EventEmitter {
         const itemId: string | undefined = payload.item_id || (payload as any).item?.id
         console.log("[OpenAIRealtimeClient] Response output item added", { responseId, itemId })
         if (responseId && !this.responseBuffers.has(responseId)) {
-          this.responseBuffers.set(responseId, "")
+          this.responseBuffers.set(responseId, { text: "", timestamp: Date.now() })
         }
         break
       }
@@ -681,6 +691,93 @@ export class OpenAIRealtimeClient extends EventEmitter {
     this.responseInProgress = false
     this.audioChunkCount = 0
     this.fallbackResponsePending = false
+    this.stopBufferCleanup()
+  }
+
+  private startBufferCleanup(): void {
+    // Clean up buffers every 2 minutes
+    this.bufferCleanupInterval = setInterval(() => {
+      this.cleanupOldBuffers()
+    }, 2 * 60 * 1000)
+  }
+
+  private stopBufferCleanup(): void {
+    if (this.bufferCleanupInterval) {
+      clearInterval(this.bufferCleanupInterval)
+      this.bufferCleanupInterval = null
+    }
+  }
+
+  private cleanupOldBuffers(): void {
+    const now = Date.now()
+    let cleanedTranscripts = 0
+    let cleanedResponses = 0
+
+    // Clean transcript buffers
+    const transcriptEntries = Array.from(this.transcriptBuffers.entries())
+    if (transcriptEntries.length > this.MAX_BUFFER_ITEMS) {
+      // Sort by timestamp, keep newest
+      transcriptEntries.sort((a, b) => b[1].timestamp - a[1].timestamp)
+      const toKeep = transcriptEntries.slice(0, this.MAX_BUFFER_ITEMS)
+      this.transcriptBuffers.clear()
+      for (const [id, data] of toKeep) {
+        this.transcriptBuffers.set(id, data)
+      }
+      cleanedTranscripts = transcriptEntries.length - this.MAX_BUFFER_ITEMS
+    }
+
+    // Remove old transcripts by age
+    for (const [id, data] of Array.from(this.transcriptBuffers.entries())) {
+      if (now - data.timestamp > this.MAX_BUFFER_AGE_MS) {
+        this.transcriptBuffers.delete(id)
+        cleanedTranscripts++
+      }
+    }
+
+    // Clean response buffers
+    const responseEntries = Array.from(this.responseBuffers.entries())
+    if (responseEntries.length > this.MAX_BUFFER_ITEMS) {
+      // Sort by timestamp, keep newest
+      responseEntries.sort((a, b) => b[1].timestamp - a[1].timestamp)
+      const toKeep = responseEntries.slice(0, this.MAX_BUFFER_ITEMS)
+      this.responseBuffers.clear()
+      for (const [id, data] of toKeep) {
+        this.responseBuffers.set(id, data)
+      }
+      cleanedResponses = responseEntries.length - this.MAX_BUFFER_ITEMS
+    }
+
+    // Remove old responses by age
+    for (const [id, data] of Array.from(this.responseBuffers.entries())) {
+      if (now - data.timestamp > this.MAX_BUFFER_AGE_MS) {
+        this.responseBuffers.delete(id)
+        cleanedResponses++
+      }
+    }
+
+    if (cleanedTranscripts > 0 || cleanedResponses > 0) {
+      console.log("[OpenAIRealtimeClient] Buffer cleanup completed", {
+        cleanedTranscripts,
+        cleanedResponses,
+        remainingTranscripts: this.transcriptBuffers.size,
+        remainingResponses: this.responseBuffers.size
+      })
+    }
+  }
+
+  public getBufferStats(): { transcriptCount: number; responseCount: number; totalMemory: number } {
+    let totalMemory = 0
+    for (const data of this.transcriptBuffers.values()) {
+      totalMemory += data.text.length * 2 // Approximate UTF-16 bytes
+    }
+    for (const data of this.responseBuffers.values()) {
+      totalMemory += data.text.length * 2
+    }
+    return {
+      transcriptCount: this.transcriptBuffers.size,
+      responseCount: this.responseBuffers.size,
+      totalMemory
+    }
   }
 }
 
